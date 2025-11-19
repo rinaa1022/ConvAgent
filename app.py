@@ -6,7 +6,8 @@ Main application for parsing resumes and building a Neo4j knowledge graph
 import streamlit as st
 import os
 import sys
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
 import json
 from datetime import datetime
 import tempfile
@@ -19,6 +20,7 @@ sys.path.append('.')
 from unified_neo4j_manager import UnifiedNeo4jManager
 from unified_schema import normalize_skill_name
 from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+from job_cache import get_jobs, JobSourceError, get_cache_age_hours
 
 # Import resume parser components
 from ResumeParser.src.resume_parser import ResumeParser
@@ -55,6 +57,8 @@ if 'processed_files' not in st.session_state:
     st.session_state.processed_files = set()
 if 'uploader_position' not in st.session_state:
     st.session_state.uploader_position = 'bottom'
+if 'latest_job_intent' not in st.session_state:
+    st.session_state.latest_job_intent = {"is_job_request": False}
 
 
 def move_uploader_to_top():
@@ -181,6 +185,131 @@ Skills:"""
     except Exception as e:
         return f"Error retrieving resume data: {e}"
 
+
+def detect_job_application_intent(prompt: str) -> Dict[str, Any]:
+    """Detect if the user is asking for job applications and normalize the role."""
+    if not prompt:
+        return {"is_job_request": False}
+
+    lowered = prompt.lower()
+    intent_keywords = ["apply", "application", "looking for", "fetch", "find me", "show me", "search for", "refresh", "update"]
+    if not any(keyword in lowered for keyword in intent_keywords):
+        return {"is_job_request": False}
+
+    role_mappings = {
+        "data science intern": "data_science_intern",
+        "machine learning intern": "data_science_intern",
+        "ml intern": "data_science_intern",
+        "ai intern": "data_science_intern",
+        "software engineer intern": "software_engineer_intern",
+        "software engineering intern": "software_engineer_intern",
+        "swe intern": "software_engineer_intern",
+        "intern": "software_engineer_intern",
+        "internship": "software_engineer_intern",
+        "data science": "data_science_full_time",
+        "machine learning": "data_science_full_time",
+        "ml engineer": "data_science_full_time",
+        "ai": "data_science_full_time",
+        "software engineer": "software_engineer_full_time",
+        "software engineering": "software_engineer_full_time",
+        "backend": "software_engineer_full_time",
+        "frontend": "software_engineer_full_time",
+        "full-time": "software_engineer_full_time",
+        "data analyst": "data_science_full_time",
+        "data engineer": "data_science_full_time",
+        "product manager": "product_management_full_time",
+        "product management": "product_management_full_time",
+        "product intern": "product_management_intern",
+        "product management intern": "product_management_intern",
+        "pm intern": "product_management_intern",
+        "quant": "quant_full_time",
+        "quantitative": "quant_full_time",
+        "trading": "quant_full_time",
+        "hardware": "hardware_full_time",
+        "electrical engineer": "hardware_full_time",
+        "embedded": "hardware_full_time",
+    }
+
+    matched_role = None
+    raw_role_phrase = None
+    for phrase, normalized in role_mappings.items():
+        if phrase in lowered:
+            matched_role = normalized
+            raw_role_phrase = phrase
+            break
+
+    # Detect if user asked for a specific number of roles
+    max_results = 5
+    count_match = re.search(r"(?:show|list|give|find)\s+(\d{1,2})\s+(?:roles|jobs|positions)", lowered)
+    if count_match:
+        try:
+            requested = int(count_match.group(1))
+            if 1 <= requested <= 20:
+                max_results = requested
+        except ValueError:
+            pass
+
+    refresh_requested = False
+    if "refresh" in lowered and any(term in lowered for term in ["job", "role", "listing", "posting"]):
+        refresh_requested = True
+    if "update" in lowered and any(term in lowered for term in ["job", "role", "listing", "posting"]):
+        refresh_requested = True
+
+    return {
+        "is_job_request": True,
+        "normalized_role": matched_role,
+        "raw_role_phrase": raw_role_phrase,
+        "original_prompt": prompt,
+        "jobs": [],
+        "error": None,
+        "max_results": max_results,
+        "refresh_requested": refresh_requested,
+        "cache_age_hours": None,
+        "is_stale": False,
+        "refresh_performed": False,
+    }
+
+
+ROLE_SOURCE_MAP = {
+    "software_engineer_intern": ("internship", "software_engineering"),
+    "software_engineer_full_time": ("full_time", "software_engineering"),
+    "data_science_intern": ("internship", "data_science"),
+    "data_science_full_time": ("full_time", "data_science"),
+    "product_management_intern": ("internship", "product_management"),
+    "product_management_full_time": ("full_time", "product_management"),
+    "quant_full_time": ("full_time", "quant"),
+    "hardware_full_time": ("full_time", "hardware"),
+}
+
+
+def format_job_suggestions(job_intent: Dict[str, Any]) -> Optional[str]:
+    """Return a markdown string with job suggestions, if available."""
+    if not job_intent.get("is_job_request"):
+        return None
+
+    jobs = job_intent.get("jobs") or []
+    error = job_intent.get("error")
+    if error:
+        return f"\n\n**Latest opportunities:**\n- Unable to fetch job listings right now: {error}"
+
+    if not jobs:
+        return "\n\n**Latest opportunities:**\n- No matching roles found in the repositories right now."
+
+    max_results = job_intent.get("max_results", 5)
+    lines = ["\n\n**Latest opportunities:**"]
+    for posting in jobs[: max_results]:
+        link = posting.apply_url or "No direct link available"
+        lines.append(f"- {posting.company} – {posting.role} ({posting.location}) – [Apply]({link})")
+
+    cache_age_hours = job_intent.get("cache_age_hours")
+    if job_intent.get("refresh_performed"):
+        lines.append("_Fetched the latest listings just now._")
+    elif job_intent.get("is_stale") and cache_age_hours is not None:
+        age_display = f"{cache_age_hours:.1f}".rstrip("0").rstrip(".")
+        lines.append(f"_Listings last updated ~{age_display}h ago. Say \"refresh jobs\" if you'd like me to update them._")
+
+    return "\n".join(lines)
+
 def query_llm_chat(user_question: str, resume_context: str, llm_provider: str, api_key: str) -> str:
     """Query LLM with user question and resume context"""
     # Build the prompt
@@ -259,8 +388,8 @@ Please provide a helpful, conversational response based on the resume informatio
 def main():
     """Main entry point"""
     st.set_page_config(
-        page_title="Resume Parser",
-        page_icon="📄",
+        page_title="JobTalk.ai",
+        page_icon="🫱🏼‍🫲🏼",
         layout="centered",
         initial_sidebar_state="collapsed"
     )
@@ -601,6 +730,34 @@ def main():
     # Chat input
     if prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
+        job_intent = detect_job_application_intent(prompt)
+        normalized_role = job_intent.get("normalized_role")
+        source_info = ROLE_SOURCE_MAP.get(normalized_role) if normalized_role else None
+
+        if job_intent.get("is_job_request") and source_info:
+            source_type, category = source_info
+            try:
+                cache_age = get_cache_age_hours(source_type, category)
+                job_intent["cache_age_hours"] = cache_age
+                stale_threshold = 8.0
+                job_intent["is_stale"] = cache_age is not None and cache_age >= stale_threshold
+
+                force_refresh = job_intent.get("refresh_requested", False)
+                job_intent["jobs"] = get_jobs(source_type, category, force_refresh=force_refresh)
+                job_intent["error"] = None
+                if force_refresh:
+                    job_intent["refresh_performed"] = True
+                    job_intent["cache_age_hours"] = get_cache_age_hours(source_type, category) or 0.0
+                    job_intent["is_stale"] = False
+                else:
+                    job_intent["refresh_performed"] = False
+                    if cache_age is None:
+                        job_intent["cache_age_hours"] = get_cache_age_hours(source_type, category) or 0.0
+            except JobSourceError as exc:
+                job_intent["jobs"] = []
+                job_intent["error"] = str(exc)
+
+        st.session_state.latest_job_intent = job_intent
         
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -632,6 +789,11 @@ Upload a resume to begin!"""
                 # Query LLM with resume context
                 with st.spinner("Thinking..."):
                     response = query_llm_chat(prompt, resume_context, llm_provider, api_key)
+
+                job_suggestions = format_job_suggestions(st.session_state.latest_job_intent)
+                if job_suggestions:
+                    response = f"{response}{job_suggestions}"
+                    st.session_state.latest_job_intent = {"is_job_request": False}
             
             st.markdown(response)
             st.session_state.messages.append({
