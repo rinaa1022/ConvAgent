@@ -168,16 +168,40 @@ Important instructions:
     
     def _call_openai(self, prompt: str) -> str:
         """Call OpenAI API"""
-        try:
-            response = openai.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=8000  # Increased to prevent truncation
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            raise Exception(f"OpenAI API error: {str(e)}")
+        # Try models in order that support higher completion token limits
+        # Note: Most OpenAI models have a 4096 max completion token limit
+        # We'll try models that might support more, with fallbacks
+        models_to_try = [
+            ("gpt-4o-2024-08-06", 20000),  # GPT-4o - try 20k first (may support more)
+            ("gpt-4o", 20000),  # GPT-4o - try 20k first
+            ("gpt-4-turbo-2024-04-09", 20000),  # GPT-4 Turbo - try 20k
+            ("gpt-4-turbo", 4096),  # GPT-4 Turbo - fallback to max supported (4096)
+            ("gpt-4", 4096),  # GPT-4 - final fallback (4096)
+        ]
+        
+        last_error = None
+        for model_name, max_tokens in models_to_try:
+            try:
+                response = openai.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=max_tokens
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # If it's a token limit error, try next model
+                if "max_tokens" in error_str or ("token" in error_str and ("too large" in error_str or "limit" in error_str or "at most" in error_str)):
+                    continue
+                # For other errors, raise immediately
+                raise Exception(f"OpenAI API error: {str(e)}")
+        
+        # If we exhausted all models, raise the last error
+        if last_error:
+            raise Exception(f"OpenAI API error: All model attempts failed. Last error: {str(last_error)}")
+        raise Exception("OpenAI API error: Unable to process request")
     
     def _call_anthropic(self, prompt: str) -> str:
         """Call Anthropic API using direct HTTP requests"""
@@ -195,99 +219,148 @@ Important instructions:
         }
 
         # Truncate prompt if it's extremely long (approximate token limit consideration)
-        # Claude-3-Haiku has context window of 200K tokens, but we need to leave room for response
+        # Claude 3.5 Sonnet has context window of 200K tokens, but we need to leave room for response
         # Rough estimate: 1 token ≈ 4 characters
-        max_chars = 150000  # Leave room for response tokens
+        max_chars = 180000  # Leave room for 20k response tokens
         if len(prompt) > max_chars:
             prompt = prompt[:max_chars] + "\n\n[Note: Resume text truncated due to length]"
 
-        data = {
-            "model": "claude-3-haiku-20240307",
-            "max_tokens": 4096,  # Claude-3-Haiku max output tokens limit
-            "temperature": 0,
-            "system": (
-                "You are a resume parser. Return valid JSON only—no prose. "
-                "If information is missing, use null. Follow the exact schema provided."
-            ),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-        }
+        # Try Claude 4 Sonnet first (supports 64k tokens) if available, otherwise fallback to Claude 3.5 Sonnet
+        models_to_try = [
+            ("claude-sonnet-4-20250514", 20000),  # Claude 4 Sonnet - try 20k first
+            ("claude-3-5-sonnet-20241022", 20000),  # Claude 3.5 Sonnet - try 20k (may not support, will fallback)
+            ("claude-3-5-sonnet-20241022", 8192),  # Claude 3.5 Sonnet - fallback to max supported
+        ]
+        
+        last_error = None
+        for model_name, max_tokens in models_to_try:
+            data = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "temperature": 0,
+                "system": (
+                    "You are a resume parser. Return valid JSON only—no prose. "
+                    "If information is missing, use null. Follow the exact schema provided."
+                ),
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+            }
 
-        try:
-            resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data)
-            
-            # Check for errors and provide detailed error message
-            if resp.status_code != 200:
-                try:
-                    error_data = resp.json()
-                    error_msg = error_data.get("error", {})
-                    
-                    # Handle different error formats
-                    if isinstance(error_msg, dict):
-                        error_detail = f"Status {resp.status_code}: {error_msg.get('message', 'Unknown error')}"
-                        if "type" in error_msg:
-                            error_detail += f" (Type: {error_msg['type']})"
-                    else:
-                        error_detail = f"Status {resp.status_code}: {str(error_msg)}"
-                    
-                    # Include request details for debugging
-                    error_detail += f"\nModel: {data['model']}, Max tokens: {data['max_tokens']}"
-                    
-                    raise Exception(f"Anthropic API error: {error_detail}")
-                except (json.JSONDecodeError, AttributeError):
-                    # If we can't parse error, return raw response
-                    error_text = resp.text[:500]  # First 500 chars
-                    raise Exception(f"Anthropic API request failed: {resp.status_code} {resp.reason}\nResponse: {error_text}")
-            
-            response_data = resp.json()
-            text = response_data.get("content", [{"text": ""}])[0].get("text", "")
-            
-            # Attempt to isolate a JSON object/array
-            json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
-            if not json_match:
-                return text.strip()
-
-            json_str = json_match.group(0)
             try:
-                # Try to parse as JSON to validate
-                json.loads(json_str)
-                return json_str
-            except json.JSONDecodeError:
-                # Clean up the JSON string
-                cleaned = json_str.replace("\n", " ").replace("\t", " ")
-                cleaned = re.sub(r",\s*}", "}", cleaned)
-                cleaned = re.sub(r",\s*]", "]", cleaned)
-                try:
-                    json.loads(cleaned)
-                    return cleaned
-                except Exception:
+                resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data)
+                
+                # Check for errors and provide detailed error message
+                if resp.status_code != 200:
+                    try:
+                        error_data = resp.json()
+                        error_msg = error_data.get("error", {})
+                        
+                        # Handle different error formats
+                        if isinstance(error_msg, dict):
+                            error_detail = f"Status {resp.status_code}: {error_msg.get('message', 'Unknown error')}"
+                            if "type" in error_msg:
+                                error_detail += f" (Type: {error_msg['type']})"
+                        else:
+                            error_detail = f"Status {resp.status_code}: {str(error_msg)}"
+                        
+                        # Include request details for debugging
+                        error_detail += f"\nModel: {data['model']}, Max tokens: {data['max_tokens']}"
+                        
+                        last_error = Exception(f"Anthropic API error: {error_detail}")
+                        # If it's a token limit error, try next model
+                        if "max_tokens" in error_detail.lower() or "token" in error_detail.lower():
+                            continue
+                        raise last_error
+                    except (json.JSONDecodeError, AttributeError):
+                        # If we can't parse error, return raw response
+                        error_text = resp.text[:500]  # First 500 chars
+                        last_error = Exception(f"Anthropic API request failed: {resp.status_code} {resp.reason}\nResponse: {error_text}")
+                        # If it's a token limit error, try next model
+                        if "max_tokens" in error_text.lower() or "token" in error_text.lower():
+                            continue
+                        raise last_error
+                
+                # Success - process response
+                response_data = resp.json()
+                text = response_data.get("content", [{"text": ""}])[0].get("text", "")
+                
+                # Attempt to isolate a JSON object/array
+                json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+                if not json_match:
                     return text.strip()
-                    
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Anthropic API request failed: {str(e)}")
-        except Exception as e:
-            if "Anthropic API" in str(e):
-                raise  # Re-raise our formatted errors
-            raise Exception(f"Anthropic API error: {str(e)}")
+
+                json_str = json_match.group(0)
+                try:
+                    # Try to parse as JSON to validate
+                    json.loads(json_str)
+                    return json_str
+                except json.JSONDecodeError:
+                    # Clean up the JSON string
+                    cleaned = json_str.replace("\n", " ").replace("\t", " ")
+                    cleaned = re.sub(r",\s*}", "}", cleaned)
+                    cleaned = re.sub(r",\s*]", "]", cleaned)
+                    try:
+                        json.loads(cleaned)
+                        return cleaned
+                    except Exception:
+                        return text.strip()
+            
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                continue  # Try next model
+            except Exception as e:
+                # If it's not a token-related error, raise immediately
+                if "max_tokens" not in str(e).lower() and "token" not in str(e).lower():
+                    raise Exception(f"Anthropic API error: {str(e)}")
+                last_error = e
+                continue  # Try next model
+        
+        # If we exhausted all models, raise the last error
+        if last_error:
+            raise Exception(f"Anthropic API error: All model attempts failed. Last error: {str(last_error)}")
+        raise Exception("Anthropic API error: Unable to process request")
     
     def _call_google(self, prompt: str) -> str:
         """Call Google Gemini API"""
-        try:
-            model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=8000,  # Increased to prevent truncation
-                    temperature=0.1
+        # Try models in order: Gemini 2.5 Pro/2.0 Pro (supports 65k), then Gemini 1.5 Pro (8192), then gemini-pro (8k)
+        models_to_try = [
+            ('gemini-2.0-pro-exp', 20000),  # Gemini 2.0 Pro experimental - try 20k
+            ('gemini-1.5-pro', 20000),  # Gemini 1.5 Pro - try 20k (may not support, will fallback)
+            ('gemini-1.5-pro', 8192),  # Gemini 1.5 Pro - fallback to max supported
+            ('gemini-pro', 8000),  # Original Gemini Pro - final fallback
+        ]
+        
+        last_error = None
+        for model_name, max_tokens in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        max_output_tokens=max_tokens,
+                        temperature=0.1
+                    )
                 )
-            )
-            return response.text
-        except Exception as e:
-            raise Exception(f"Google API error: {str(e)}")
+                return response.text
+            except Exception as e:
+                last_error = e
+                # If it's a token limit error, try next model
+                if "max_output_tokens" in str(e).lower() or "token" in str(e).lower():
+                    continue
+                # If it's a model not found error, try next model
+                if "not found" in str(e).lower() or "invalid" in str(e).lower():
+                    continue
+                # For other errors, raise immediately
+                raise Exception(f"Google API error: {str(e)}")
+        
+        # If we exhausted all models, raise the last error
+        if last_error:
+            raise Exception(f"Google API error: All model attempts failed. Last error: {str(last_error)}")
+        raise Exception("Google API error: Unable to process request")
     
     def _extract_json_from_text(self, text: str) -> str:
         """Extract JSON object from text that might contain markdown or other content"""

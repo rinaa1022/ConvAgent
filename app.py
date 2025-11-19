@@ -274,25 +274,46 @@ def main():
     
     /* Main container */
     .main .block-container {
-        padding-top: 1rem;
-        padding-bottom: 6rem;  /* Extra padding to prevent content from being hidden behind chat input */
+        padding-top: 4rem;  /* Extra space for top button */
+        padding-bottom: 12rem;  /* Extra padding to prevent content from being hidden behind uploader and chat input */
         max-width: 800px;
     }
     
-    /* Setup button styling */
-    .setup-button {
+    /* Save & Start button should stay at bottom - ensure it's not affected */
+    /* We'll handle this in JavaScript to be precise */
+    
+    /* File uploader styling - floating above chat input, centered */
+    div[data-testid="stFileUploader"] {
         position: fixed;
-        top: 1rem;
-        right: 1rem;
-        z-index: 1000;
+        bottom: 110px;  /* Increased gap to avoid overlap with chat input */
+        left: 50%;
+        transform: translateX(-50%);
+        width: 100%;
+        max-width: 800px;
+        z-index: 998;
+        background: var(--background-color);
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        border: 1px solid rgba(250, 250, 250, 0.1);
+        transition: bottom 0.3s ease, opacity 0.3s ease;
+        margin-bottom: 10px;  /* Additional gap below */
+    }
+    
+    /* Adjust uploader position when messages exist */
+    .main .block-container:has([data-testid="stChatMessage"]) ~ * div[data-testid="stFileUploader"],
+    .main .block-container:has([data-testid="stChatMessage"]) + * div[data-testid="stFileUploader"] {
+        opacity: 0.7;
     }
     
     /* Chat input styling - ensure it doesn't overlap content */
     .stChatInput {
         position: fixed;
         bottom: 0;
-        left: 0;
-        right: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 100%;
+        max-width: 800px;
         z-index: 999;
         background: var(--background-color);
         padding: 1rem;
@@ -303,28 +324,94 @@ def main():
     [data-testid="stChatMessage"] {
         margin-bottom: 1.5rem;
     }
-    
-    /* File uploader styling - sticky at top */
-    div[data-testid="stFileUploader"] {
-        position: sticky;
-        top: 0;
-        background: var(--background-color);
-        z-index: 100;
-        padding: 1rem 0;
-        margin-bottom: 1.5rem;
-        border-bottom: 1px solid rgba(250, 250, 250, 0.1);
-    }
-    
-    /* Ensure proper spacing */
-    .upload-container {
-        margin-bottom: 1rem;
-    }
     </style>
+    <script>
+    // Dynamically adjust uploader position as content grows
+    function adjustUploaderPosition() {
+        const chatMessages = document.querySelectorAll('[data-testid="stChatMessage"]');
+        const uploader = document.querySelector('div[data-testid="stFileUploader"]');
+        const chatInput = document.querySelector('.stChatInput');
+        
+        if (uploader && chatInput && chatMessages.length > 0) {
+            // Get the total height of chat messages
+            let totalHeight = 0;
+            chatMessages.forEach(msg => {
+                totalHeight += msg.offsetHeight;
+            });
+            
+            // Adjust uploader position based on content
+            // Minimum bottom position is 110px (above chat input with gap)
+            // As content grows, it can move up
+            const windowHeight = window.innerHeight;
+            const chatInputHeight = chatInput.offsetHeight;
+            const uploaderHeight = uploader.offsetHeight;
+            const gapBetween = 25;  // Gap between uploader and chat input
+            
+            // Calculate if content would overlap
+            const contentBottom = totalHeight;
+            const availableSpace = windowHeight - chatInputHeight - uploaderHeight - gapBetween - 20; // 20px margin
+            
+            // If content is taller than available space, move uploader up
+            if (contentBottom > availableSpace) {
+                const moveUp = Math.min(contentBottom - availableSpace + 110, windowHeight * 0.4);
+                uploader.style.bottom = (110 + moveUp) + 'px';
+            } else {
+                uploader.style.bottom = '110px';
+            }
+        }
+    }
+    
+    // Run on page load and when new messages appear
+    window.addEventListener('load', adjustUploaderPosition);
+    
+    // Use MutationObserver to watch for new chat messages and DOM changes
+    const observer = new MutationObserver(function(mutations) {
+        let shouldUpdate = false;
+        mutations.forEach(function(mutation) {
+            if (mutation.addedNodes.length || mutation.type === 'childList') {
+                shouldUpdate = true;
+            }
+            // Check if button styles were modified
+            if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+                const target = mutation.target;
+                if (target.tagName === 'BUTTON' || target.closest('div[data-testid="stButton"]')) {
+                    shouldUpdate = true;
+                }
+            }
+        });
+        if (shouldUpdate) {
+            setTimeout(function() {
+                adjustUploaderPosition();
+            }, 50);
+        }
+    });
+    
+    // Start observing after a short delay to ensure DOM is ready
+    setTimeout(function() {
+        const container = document.querySelector('.main .block-container');
+        if (container) {
+            observer.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+        }
+        // Also observe the entire document for button changes
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+        adjustUploaderPosition();
+    }, 500);
+    
+    // Also adjust on scroll/resize
+    window.addEventListener('resize', adjustUploaderPosition);
+    window.addEventListener('scroll', adjustUploaderPosition);
+    </script>
     """, unsafe_allow_html=True)
     
-    # Setup button - fixed position top right
-    if st.button("⚙️ Setup", key="setup_button", use_container_width=False):
-        st.session_state.show_setup = not st.session_state.show_setup
+    
+    
+    # Setup button - centered at top, displays "JobTalk!"
+    # Use columns to center the button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("JobTalk!", key="setup_button", use_container_width=True):
+            st.session_state.show_setup = not st.session_state.show_setup
+    
     
     # Setup modal
     if st.session_state.show_setup or not st.session_state.setup_complete:
@@ -371,6 +458,7 @@ def main():
         st.session_state.config_neo4j_uri = neo4j_uri
         st.session_state.config_neo4j_user = neo4j_user
         st.session_state.config_neo4j_password = neo4j_password
+        connection_status = None
         
         col1, col2 = st.columns(2)
         with col1:
@@ -378,12 +466,12 @@ def main():
                 try:
                     test_manager = UnifiedNeo4jManager(neo4j_uri, neo4j_user, neo4j_password)
                     if test_manager.test_connection():
-                        st.success("✅ Connection successful!")
+                        connection_status = ("success", "✅ Connection successful!")
                         test_manager.close()
                     else:
-                        st.error("❌ Connection failed!")
+                        connection_status = ("error", "❌ Connection failed!")
                 except Exception as e:
-                    st.error(f"❌ Error: {e}")
+                    connection_status = ("error", f"❌ Error: {e}")
         
         with col2:
             if st.button("Save & Start", type="primary", use_container_width=True):
@@ -394,13 +482,20 @@ def main():
                 else:
                     st.error("Please fill all fields")
         
+        if connection_status:
+            status_type, status_message = connection_status
+            if status_type == "success":
+                st.success(status_message)
+            elif status_type == "error":
+                st.error(status_message)
+        
         st.markdown("---")
     
     # Check if setup is complete
     if not st.session_state.setup_complete:
         return
     
-    # File uploader - placed at top (sticky via CSS)
+    # File uploader - defined early but positioned at bottom via CSS
     uploaded_file = st.file_uploader(
         "Upload Resume (PDF, DOCX, TXT)",
         type=['pdf', 'docx', 'txt'],
@@ -483,7 +578,7 @@ def main():
                 response = """I can help you parse and explore resumes.
 
 **To get started:**
-1. Upload a resume file using the file uploader above
+1. Upload a resume file using the file uploader below
 2. Once parsed, I can answer questions about that resume
 
 **You can ask questions like:**
