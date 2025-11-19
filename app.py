@@ -53,6 +53,13 @@ if 'current_resume_name' not in st.session_state:
 # Track processed files to avoid duplicates
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = set()
+if 'uploader_position' not in st.session_state:
+    st.session_state.uploader_position = 'bottom'
+
+
+def move_uploader_to_top():
+    """Ensure the uploader docks below the JobTalk button after first use."""
+    st.session_state.uploader_position = 'top'
 
 def initialize_components(llm_provider: str, api_key: str, neo4j_uri: str, neo4j_user: str, neo4j_password: str):
     """Initialize all components with configuration"""
@@ -272,37 +279,56 @@ def main():
         display: none;
     }
     
-    /* Main container */
     .main .block-container {
-        padding-top: 4rem;  /* Extra space for top button */
-        padding-bottom: 12rem;  /* Extra padding to prevent content from being hidden behind uploader and chat input */
         max-width: 800px;
+        padding-top: 1.5rem;
+        padding-bottom: 6rem;
     }
     
-    /* Save & Start button should stay at bottom - ensure it's not affected */
-    /* We'll handle this in JavaScript to be precise */
+    body[data-uploader-position="bottom"] .main .block-container {
+        padding-top: 4rem;
+        padding-bottom: 12rem;
+    }
     
-    /* File uploader styling - floating above chat input, centered */
+    body[data-uploader-position="top"] .main .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 6rem;
+    }
+    
+    /* File uploader base styling */
     div[data-testid="stFileUploader"] {
-        position: fixed;
-        bottom: 110px;  /* Increased gap to avoid overlap with chat input */
-        left: 50%;
-        transform: translateX(-50%);
-        width: 100%;
-        max-width: 800px;
         z-index: 998;
         background: var(--background-color);
         padding: 1rem;
         border-radius: 8px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         border: 1px solid rgba(250, 250, 250, 0.1);
-        transition: bottom 0.3s ease, opacity 0.3s ease;
-        margin-bottom: 10px;  /* Additional gap below */
+        transition: bottom 0.3s ease, opacity 0.3s ease, transform 0.3s ease;
     }
     
-    /* Adjust uploader position when messages exist */
-    .main .block-container:has([data-testid="stChatMessage"]) ~ * div[data-testid="stFileUploader"],
-    .main .block-container:has([data-testid="stChatMessage"]) + * div[data-testid="stFileUploader"] {
+    body[data-uploader-position="bottom"] div[data-testid="stFileUploader"] {
+        position: fixed;
+        bottom: 110px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 100%;
+        max-width: 800px;
+        margin-bottom: 10px;
+    }
+    
+    body[data-uploader-position="top"] div[data-testid="stFileUploader"] {
+        position: static;
+        width: 100%;
+        max-width: 800px;
+        margin: 1rem auto 2rem;
+        transform: none;
+        bottom: auto;
+        left: auto;
+    }
+    
+    /* Adjust uploader opacity when messages exist and it's floating */
+    body[data-uploader-position="bottom"] .main .block-container:has([data-testid="stChatMessage"]) ~ * div[data-testid="stFileUploader"],
+    body[data-uploader-position="bottom"] .main .block-container:has([data-testid="stChatMessage"]) + * div[data-testid="stFileUploader"] {
         opacity: 0.7;
     }
     
@@ -325,79 +351,85 @@ def main():
         margin-bottom: 1.5rem;
     }
     </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
     <script>
-    // Dynamically adjust uploader position as content grows
-    function adjustUploaderPosition() {
+    document.body.setAttribute('data-uploader-position', '{st.session_state.uploader_position}');
+    
+    // Dynamically adjust uploader position as content grows (bottom mode only)
+    function adjustUploaderPosition() {{
         const chatMessages = document.querySelectorAll('[data-testid="stChatMessage"]');
         const uploader = document.querySelector('div[data-testid="stFileUploader"]');
         const chatInput = document.querySelector('.stChatInput');
+        const uploaderPosition = document.body.getAttribute('data-uploader-position');
         
-        if (uploader && chatInput && chatMessages.length > 0) {
-            // Get the total height of chat messages
+        if (!uploader || !chatInput) {{
+            return;
+        }}
+        
+        if (uploaderPosition === 'top') {{
+            uploader.style.bottom = '';
+            uploader.style.left = '';
+            uploader.style.transform = '';
+            uploader.style.position = '';
+            return;
+        }}
+        
+        if (chatMessages.length > 0) {{
             let totalHeight = 0;
-            chatMessages.forEach(msg => {
+            chatMessages.forEach(msg => {{
                 totalHeight += msg.offsetHeight;
-            });
+            }});
             
-            // Adjust uploader position based on content
-            // Minimum bottom position is 110px (above chat input with gap)
-            // As content grows, it can move up
             const windowHeight = window.innerHeight;
             const chatInputHeight = chatInput.offsetHeight;
             const uploaderHeight = uploader.offsetHeight;
-            const gapBetween = 25;  // Gap between uploader and chat input
+            const gapBetween = 25;
             
-            // Calculate if content would overlap
             const contentBottom = totalHeight;
-            const availableSpace = windowHeight - chatInputHeight - uploaderHeight - gapBetween - 20; // 20px margin
+            const availableSpace = windowHeight - chatInputHeight - uploaderHeight - gapBetween - 20;
             
-            // If content is taller than available space, move uploader up
-            if (contentBottom > availableSpace) {
+            if (contentBottom > availableSpace) {{
                 const moveUp = Math.min(contentBottom - availableSpace + 110, windowHeight * 0.4);
                 uploader.style.bottom = (110 + moveUp) + 'px';
-            } else {
+            }} else {{
                 uploader.style.bottom = '110px';
-            }
-        }
-    }
+            }}
+        }}
+    }}
     
-    // Run on page load and when new messages appear
     window.addEventListener('load', adjustUploaderPosition);
     
-    // Use MutationObserver to watch for new chat messages and DOM changes
-    const observer = new MutationObserver(function(mutations) {
+    const observer = new MutationObserver(function(mutations) {{
         let shouldUpdate = false;
-        mutations.forEach(function(mutation) {
-            if (mutation.addedNodes.length || mutation.type === 'childList') {
+        mutations.forEach(function(mutation) {{
+            if (mutation.addedNodes.length || mutation.type === 'childList') {{
                 shouldUpdate = true;
-            }
-            // Check if button styles were modified
-            if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+            }}
+            if (mutation.type === 'attributes' && mutation.attributeName === 'style') {{
                 const target = mutation.target;
-                if (target.tagName === 'BUTTON' || target.closest('div[data-testid="stButton"]')) {
+                if (target.tagName === 'BUTTON' || target.closest('div[data-testid="stButton"]')) {{
                     shouldUpdate = true;
-                }
-            }
-        });
-        if (shouldUpdate) {
-            setTimeout(function() {
+                }}
+            }}
+        }});
+        if (shouldUpdate) {{
+            setTimeout(function() {{
                 adjustUploaderPosition();
-            }, 50);
-        }
-    });
+            }}, 50);
+        }}
+    }});
     
-    // Start observing after a short delay to ensure DOM is ready
-    setTimeout(function() {
+    setTimeout(function() {{
         const container = document.querySelector('.main .block-container');
-        if (container) {
-            observer.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
-        }
-        // Also observe the entire document for button changes
-        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+        if (container) {{
+            observer.observe(container, {{ childList: true, subtree: true, attributes: true, attributeFilter: ['style'] }});
+        }}
+        observer.observe(document.body, {{ childList: true, subtree: true, attributes: true, attributeFilter: ['style'] }});
         adjustUploaderPosition();
-    }, 500);
+    }}, 500);
     
-    // Also adjust on scroll/resize
     window.addEventListener('resize', adjustUploaderPosition);
     window.addEventListener('scroll', adjustUploaderPosition);
     </script>
@@ -500,6 +532,7 @@ def main():
         "Upload Resume (PDF, DOCX, TXT)",
         type=['pdf', 'docx', 'txt'],
         key="resume_upload",
+        on_change=move_uploader_to_top,
         label_visibility="visible"
     )
     
