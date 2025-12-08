@@ -10,3 +10,7 @@ typing-extensions==4.8.0
 requests==2.31.0
 nltk==3.8.1
 pandas==2.1.4
+beautifulsoup4==4.12.2   
+sentence-transformers==2.2.2
+huggingface-hub==0.24.6
+scikit-learn==1.3.2

@@ -52,6 +52,8 @@ if 'current_resume_id' not in st.session_state:
     st.session_state.current_resume_id = None
 if 'current_resume_name' not in st.session_state:
     st.session_state.current_resume_name = None
+if 'pending_second_batch' not in st.session_state:
+    st.session_state.pending_second_batch = None
 # Track processed files to avoid duplicates
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = set()
@@ -147,16 +149,16 @@ def get_resume_context(person_id: str) -> str:
         
         context = f"""RESUME INFORMATION FOR {person.get('name', 'Unknown')}:
 
-Personal Information:
-- Name: {person.get('name', 'N/A')}
-- Email: {person.get('email', 'N/A')}
-- Phone: {person.get('phone', 'N/A')}
-- LinkedIn: {person.get('linkedin', 'N/A')}
-- GitHub: {person.get('github', 'N/A')}
-- Summary: {person.get('summary', 'N/A')}
+        Personal Information:
+        - Name: {person.get('name', 'N/A')}
+        - Email: {person.get('email', 'N/A')}
+        - Phone: {person.get('phone', 'N/A')}
+        - LinkedIn: {person.get('linkedin', 'N/A')}
+        - GitHub: {person.get('github', 'N/A')}
+        - Summary: {person.get('summary', 'N/A')}
 
-Skills:"""
-        
+        Skills:"""
+                
         for skill in skills:
             proficiency = f" ({skill.get('proficiency')})" if skill.get('proficiency') else ""
             context += f"\n- {skill['skill']} ({skill.get('category', 'N/A')}){proficiency}"
@@ -192,7 +194,7 @@ def detect_job_application_intent(prompt: str) -> Dict[str, Any]:
         return {"is_job_request": False}
 
     lowered = prompt.lower()
-    intent_keywords = ["apply", "application", "looking for", "fetch", "find me", "show me", "search for", "refresh", "update"]
+    intent_keywords = ["apply", "application", "looking for", "fetch", "find me", "show me", "search for", "refresh", "update", "return", "list", "give me", "jobs", "roles", "positions", "openings", "opportunities"]
     if not any(keyword in lowered for keyword in intent_keywords):
         return {"is_job_request": False}
 
@@ -269,6 +271,29 @@ def detect_job_application_intent(prompt: str) -> Dict[str, Any]:
         "refresh_performed": False,
     }
 
+def extract_location_from_prompt(prompt: str) -> Optional[str]:
+    """
+    Very simple heuristic for locations like:
+    - 'in Seattle'
+    - 'in California'
+    - 'in New York'
+    Returns a cleaned location string or None.
+    """
+    lowered = prompt.lower()
+    m = re.search(r"\bin\s+([a-z\s,]+)", lowered)
+    if not m:
+        return None
+
+    loc = m.group(1)
+
+    # Strip trailing generic words
+    stop_words = ["jobs", "job", "roles", "positions", "internships", "internship"]
+    for w in stop_words:
+        loc = loc.replace(w, "")
+
+    loc = loc.strip(" ,")
+    return loc or None
+
 
 ROLE_SOURCE_MAP = {
     "software_engineer_intern": ("internship", "software_engineering"),
@@ -310,20 +335,93 @@ def format_job_suggestions(job_intent: Dict[str, Any]) -> Optional[str]:
 
     return "\n".join(lines)
 
+def interpret_semantic_score(score: float) -> str:
+    """
+    Human-readable label for the combined semantic score.
+
+    This is based on coverage + SBERT + TF-IDF.
+    """
+    if score is None:
+        return "Unknown alignment"
+    if score >= 0.40:
+        return "Strong alignment"
+    elif score >= 0.30:
+        return "Moderate alignment"
+    elif score >= 0.20:
+        return "Weak alignment"
+    else:
+        return "Very weak alignment"
+
+def format_kg_job_suggestions(recommended_jobs: List[Dict[str, Any]]) -> str:
+    """Format KG-based job recommendations (from Neo4j) as markdown."""
+    if not recommended_jobs:
+        return "\n\n**Matched opportunities (KG-based):**\n- No matching roles found in the knowledge graph right now."
+
+    lines = ["\n\n**Matched opportunities (KG-based):**"]
+    for job in recommended_jobs:
+        title = job.get("title") or "Untitled role"
+        company = job.get("company") or "Unknown company"
+        location = job.get("location") or "Unknown location"
+        url = job.get("apply_url") or ""
+
+        overlap = job.get("matching_skill_count", 0)
+        total = job.get("total_skill_required", 0)
+        coverage = job.get("coverage", 0.0)
+
+        matching_skills = job.get("matching_skills") or []
+        missing_skills = job.get("missing_skills") or []  # NEW
+
+        if url:
+            line = f"- [{company} – {title}]({url}) ({location})"
+        else:
+            line = f"- {company} – {title} ({location})"
+
+        line += f" — skill overlap: {overlap}/{total} ({coverage:.2f} coverage)"
+
+        # show marching skills
+        if matching_skills:
+            line += f" — matching skills: {', '.join(matching_skills)}"
+
+        # show missing skills
+        if missing_skills:
+            line += f" — missing skills: {', '.join(missing_skills)}"
+
+        semantic_score = job.get("combined_score")
+        if semantic_score is not None:
+            label = interpret_semantic_score(semantic_score)
+            line += f" — Semantic score: {semantic_score:.2f} ({label})"
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+    
 def query_llm_chat(user_question: str, resume_context: str, llm_provider: str, api_key: str) -> str:
     """Query LLM with user question and resume context"""
     # Build the prompt
-    system_prompt = """You are a helpful career advisor assistant. You help users understand their resume, identify skill gaps, suggest job roles they're suited for, and provide career guidance based on their resume information.
+    system_prompt = """
+    You are a helpful career advisor assistant. You help users understand their resume, identify skill gaps, suggest job roles they're suited for, and provide career guidance based on their resume information.
 
-You have access to the user's resume data. Use this information to:
-- Answer questions about their skills, experience, and education
-- Suggest job roles they're a strong fit for based on their background
-- Identify skills they might be lacking for specific roles
-- Provide career advice and recommendations
-- Be conversational, helpful, and specific
+    You have access to:
+    - The user's resume data (parsed into a structured knowledge graph).
+    - Separate job-matching logic that may append matched job opportunities
+    after your answer.
 
-When job data is available in the future, you'll be able to match resumes to actual job postings."""
-    
+    Your job is to:
+    - Analyze the resume, skills, experience, and education.
+    - Suggest job roles and internship roles the user is a strong fit for.
+    - Explain why certain roles fit based on their background.
+    - Identify skill gaps and recommend what to learn next.
+    - Give concrete, encouraging career advice.
+
+    Important:
+    - DO NOT say that you lack access to real-time job data or job postings.
+    - DO NOT mention browsing the internet or limitations about not seeing current jobs.
+    - The application will handle fetching and displaying specific matched jobs
+    (for example under 'Matched opportunities (KG-based)'). You should focus
+    on interpreting the resume and giving guidance that complements those matches.
+    """
+
     user_prompt = f"""{resume_context}
 
 USER QUESTION: {user_question}
@@ -336,7 +434,7 @@ Please provide a helpful, conversational response based on the resume informatio
             import openai
             openai.api_key = api_key
             response = openai.chat.completions.create(
-                model="gpt-4",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -729,77 +827,152 @@ def main():
     
     # Chat input
     if prompt := st.chat_input("Ask a question..."):
+        # Always store user message first
         st.session_state.messages.append({"role": "user", "content": prompt})
-        job_intent = detect_job_application_intent(prompt)
-        normalized_role = job_intent.get("normalized_role")
-        source_info = ROLE_SOURCE_MAP.get(normalized_role) if normalized_role else None
 
-        if job_intent.get("is_job_request") and source_info:
-            source_type, category = source_info
-            try:
-                cache_age = get_cache_age_hours(source_type, category)
-                job_intent["cache_age_hours"] = cache_age
-                stale_threshold = 8.0
-                job_intent["is_stale"] = cache_age is not None and cache_age >= stale_threshold
-
-                force_refresh = job_intent.get("refresh_requested", False)
-                job_intent["jobs"] = get_jobs(source_type, category, force_refresh=force_refresh)
-                job_intent["error"] = None
-                if force_refresh:
-                    job_intent["refresh_performed"] = True
-                    job_intent["cache_age_hours"] = get_cache_age_hours(source_type, category) or 0.0
-                    job_intent["is_stale"] = False
-                else:
-                    job_intent["refresh_performed"] = False
-                    if cache_age is None:
-                        job_intent["cache_age_hours"] = get_cache_age_hours(source_type, category) or 0.0
-            except JobSourceError as exc:
-                job_intent["jobs"] = []
-                job_intent["error"] = str(exc)
-
-        st.session_state.latest_job_intent = job_intent
-        
+        # Show user bubble
         with st.chat_message("user"):
             st.markdown(prompt)
-        
+
+        # Assistant bubble
         with st.chat_message("assistant"):
-            # Check if there's a current resume
-            if not st.session_state.current_resume_id:
-                response = """I can help you parse and explore resumes.
-
-**To get started:**
-1. Upload a resume file using the file uploader below
-2. Once parsed, I can answer questions about that resume
-
-**You can ask questions like:**
-- "What job roles am I a strong fit for?"
-- "What skills am I lacking for a data scientist role?"
-- "What are my strengths based on my resume?"
-- "What career path would suit me?"
-
-Upload a resume to begin!"""
-            else:
-                # Get resume context
-                resume_context = get_resume_context(st.session_state.current_resume_id)
-                
-                # Get LLM provider and API key from session state
-                llm_provider = st.session_state.config_llm_provider
-                api_key = st.session_state.config_api_key
-                
-                # Query LLM with resume context
+            try:
                 with st.spinner("Thinking..."):
-                    response = query_llm_chat(prompt, resume_context, llm_provider, api_key)
+                    # 1) No resume yet → just show instructions, skip everything else
+                    if not st.session_state.current_resume_id:
+                        response = """I can help you parse and explore resumes.
 
-                job_suggestions = format_job_suggestions(st.session_state.latest_job_intent)
-                if job_suggestions:
-                    response = f"{response}{job_suggestions}"
-                    st.session_state.latest_job_intent = {"is_job_request": False}
-            
-            st.markdown(response)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response
-            })
+                        **To get started:**
+                        1. Upload a resume file using the file uploader below
+                        2. Once parsed, I can answer questions about that resume and match it to jobs
+
+                        **You can ask questions like:**
+                        - "What job roles am I a strong fit for?"
+                        - "Find software engineering internships that match my skills."
+                        - "What skills am I lacking for a data scientist role?"
+                        - "What career path would suit me?"
+
+                        Upload a resume to begin!"""
+                        final_response = response
+
+                    else:
+                        # We have a resume → get resume context
+                        resume_context = get_resume_context(st.session_state.current_resume_id)
+
+                        llm_provider = st.session_state.config_llm_provider
+                        api_key = st.session_state.config_api_key
+
+                        # Call LLM for the main conversational answer
+                        response = query_llm_chat(prompt, resume_context, llm_provider, api_key)
+
+                        # Detect job intent and fetch jobs
+                        job_intent = detect_job_application_intent(prompt)
+                        st.session_state.latest_job_intent = job_intent
+
+                        recommended_jobs_markdown = ""
+
+                        if job_intent.get("is_job_request"):
+                            normalized_role = job_intent.get("normalized_role")
+                            source_info = (
+                                ROLE_SOURCE_MAP.get(normalized_role)
+                                if normalized_role
+                                else None
+                            )
+
+                            # Only hit GitHub / Neo4j if we have a mapped role
+                            if source_info:
+                                source_type, category = source_info
+                                try:
+                                    # --- Fetch GitHub jobs into cache + Neo4j ---
+                                    cache_age = get_cache_age_hours(source_type, category)
+                                    job_intent["cache_age_hours"] = cache_age
+                                    stale_threshold = 1.0
+                                    job_intent["is_stale"] = (cache_age is not None and cache_age >= stale_threshold)
+
+                                    force_refresh = job_intent.get("refresh_requested", False)
+                                    job_intent["jobs"] = get_jobs(source_type, category, force_refresh=force_refresh, page=1, page_size=50)
+                                    job_intent["error"] = None
+
+                                    if force_refresh:
+                                        job_intent["refresh_performed"] = True
+                                        job_intent["cache_age_hours"] = (get_cache_age_hours(source_type, category) or 0.0)
+                                        job_intent["is_stale"] = False
+                                    else:
+                                        job_intent["refresh_performed"] = False
+                                        if cache_age is None:
+                                            job_intent["cache_age_hours"] = (get_cache_age_hours(source_type, category) or 0.0)
+                                except JobSourceError as exc:
+                                    job_intent["jobs"] = []
+                                    job_intent["error"] = f"Job source error: {exc}"
+                                except Exception as exc:
+                                    job_intent["jobs"] = []
+                                    job_intent["error"] = f"Unexpected error while fetching jobs: {exc}"
+
+                                # --- KG-based recommendations from Neo4j ---
+                                try:
+                                    # Extract location from the user prompt, e.g. "in California", "in Seattle"
+                                    user_location = extract_location_from_prompt(prompt)
+
+                                    max_results = job_intent.get("max_results", 5)
+
+                                    result = st.session_state.unified_manager.recommend_jobs_for_person(
+                                        person_id=st.session_state.current_resume_id,
+                                        limit=max_results,
+                                        source=source_type,
+                                        category=category,
+                                        location=user_location,  # string or None
+                                    )
+
+                                    recommended = result.get("selected_jobs", [])
+                                    meta = result.get("meta", {}) or {}
+
+                                    recommended_jobs_markdown = format_kg_job_suggestions(recommended)
+
+                                    # only show skill-gap suggestion if *no* jobs were returned
+                                    top_skills = meta.get("top_skills_from_jobs") or []
+                                    improvement_skills = meta.get("improvement_skills") or []
+
+                                    if not recommended and (improvement_skills or top_skills):
+                                        skills_to_show = improvement_skills or top_skills
+                                        recommended_jobs_markdown += (
+                                            "\n\n_There were no strong matches in the given roles._ "
+                                            "Based on those jobs, you might want to strengthen: "
+                                            + ", ".join(f"**{s}**" for s in skills_to_show)
+                                        )
+
+
+                                except Exception as e:
+                                    st.error(f"KG-based matching failed: {e}")
+                                    recommended_jobs_markdown = "\nMatched opportunities (KG-based):\n\n- Unable to fetch job matches."
+
+
+                            # Clear intent so it’s not reused next time
+                            st.session_state.latest_job_intent = {
+                                "is_job_request": False
+                            }
+
+                        # Combine LLM answer + job list
+                        if recommended_jobs_markdown:
+                            final_response = f"{response}{recommended_jobs_markdown}"
+                        else:
+                            final_response = response
+
+                    # Render and store assistant message
+                    st.markdown(final_response)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": final_response}
+                    )
+
+            except Exception as outer_exc:
+                # Catch ANY error so Streamlit doesn’t silently die
+                import traceback
+
+                traceback.print_exc()
+                st.error(
+                    f"Something went wrong while handling your message: {outer_exc}"
+                )
+
+
 
 if __name__ == "__main__":
     main()

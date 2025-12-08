@@ -30,15 +30,17 @@ FULL_TIME_SECTION_MARKERS = {
 }
 
 INTERNSHIP_SECTION_MARKERS = {
-    "software_engineering": "## 💻 Software Engineering Internships",
-    "data_science": "## 🤖 Data Science, AI & Machine Learning Internships",
-    "product_management": "## 📱 Product Management Internships",
-    "hardware": "## 🔧 Hardware Engineering Internships",
+    "software_engineering": "## 💻 Software Engineering Internship Roles",
+    "data_science": "## 🤖 Data Science, AI & Machine Learning Internship Roles",
+    "product_management": "## 📱 Product Management Internship Roles",
+    "quant": "## 📈 Quantitative Finance Internship Roles",
+    "hardware": "## 🔧 Hardware Engineering Internship Roles",
 }
 
 
 @dataclass
 class JobPosting:
+    job_id: str 
     company: str
     role: str
     location: str
@@ -106,8 +108,12 @@ def _parse_table(table_html: str, category: str, source: str) -> List[JobPosting
 
         age = cols[4].get_text(strip=True) if len(cols) > 4 else None
 
+        base_id = f"{source}:{category}:{company}:{role}:{location}"
+        job_id = re.sub(r"\s+", "_", base_id.strip().lower())
+        
         postings.append(
             JobPosting(
+                job_id=job_id,
                 company=company,
                 role=role,
                 location=location,

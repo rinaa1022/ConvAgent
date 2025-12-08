@@ -6,6 +6,7 @@ Defines the ontology for resume data in Neo4j knowledge graph
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from enum import Enum
+import re
 
 class SkillCategory(Enum):
     TECHNICAL = "Technical"
@@ -104,6 +105,17 @@ class Education:
     gpa: Optional[str] = None
     courses: List[str] = field(default_factory=list)
 
+@dataclass
+class Project:
+    """Project entity"""
+    id: str
+    title: str
+    description: Optional[str] = None
+    technologies: List[str] = field(default_factory=list)
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
 # Unified Relationship Types
 class UnifiedRelationships:
     """Constants for unified knowledge graph relationships"""
@@ -113,6 +125,7 @@ class UnifiedRelationships:
     PERSON_HAS_EXPERIENCE = "HAS_EXPERIENCE"
     PERSON_HAS_EDUCATION = "HAS_EDUCATION"
     PERSON_LOCATED_IN = "LOCATED_IN"
+    PERSON_HAS_PROJECT = "HAS_PROJECT" 
     
     # Organization relationships
     ORG_LOCATED_IN = "LOCATED_IN"
@@ -169,6 +182,7 @@ SKILL_ONTOLOGY = {
     "javascript": ["js", "ecmascript", "node.js", "nodejs"],
     "java": ["java programming", "jdk"],
     "typescript": ["ts", "typescript programming"],
+    "c": ["c", "c language", "objective c"],
     "c++": ["cpp", "c plus plus"],
     "c#": ["csharp", "c sharp"],
     
@@ -213,12 +227,38 @@ def get_skill_aliases(skill_name: str) -> List[str]:
 
 def normalize_skill_name(skill_name: str) -> str:
     """Normalize skill name to canonical form"""
-    skill_lower = skill_name.lower().strip()
+    if not skill_name:
+        return ""
     
-    # Check if it's an alias
+    skill_lower = skill_name.lower().strip()
+
+    # If it's exactly a canonical key
+    if skill_lower in SKILL_ONTOLOGY:
+        return skill_lower.title()
+
+    # Check aliases
     for canonical, aliases in SKILL_ONTOLOGY.items():
         if skill_lower in aliases:
             return canonical.title()
     
-    return skill_name.title()
+    return skill_lower.title()
 
+def expand_skill_name(skill_name: str) -> List[str]:
+    """
+    Expand composite skill labels like 'C/C++' into multiple canonical skills.
+    Example:
+      'C/C++' or 'C / C++'  -> ['C', 'C++']
+      otherwise             -> [<single normalized skill>]
+    """
+    if not skill_name:
+        return []
+
+    skill_lower = skill_name.lower().strip()
+
+    # Special handling for C / C++
+    # Matches: "c/c++", "c / c++", "c++/c", "c++ / c" (any spacing, any case handled by lower())
+    if re.fullmatch(r"c\s*/\s*c\+\+|c\+\+\s*/\s*c", skill_lower):
+        return ["C", "C++"]
+
+    # single normalized skill
+    return [normalize_skill_name(skill_name)]
