@@ -2,7 +2,7 @@ import os
 import json
 import re
 import requests
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import PyPDF2
 from docx import Document
 try:
@@ -164,6 +164,13 @@ Important instructions:
 6. Extract all educational qualifications
 7. For arrays (languages, achievements, skills, etc.), only include actual values - skip empty or missing items
 8. Return ONLY the JSON object, no additional text or formatting
+9. If you see a section like "Languages: Python, Java, C++,...", treat these as
+   programming languages and put them into the "skills" array with category
+   "Technical". Reserve the top-level "languages" array ONLY for human languages
+   (e.g., English, Japanese, Korean).
+10. EVERY other technical keyword (programming languages, frameworks, tools, libraries, databases, cloud platforms, etc.)
+  must go into the "skills" array with category "Technical". 
+  If you are unsure whether something is a natural language or a technical term, treat it as a technical skill.
 """
     
     def _call_openai(self, prompt: str) -> str:
@@ -530,6 +537,79 @@ Important instructions:
         
         return json_str  # If no fix worked, return original
     
+    def _augment_skills_from_other_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ensure data["skills"] contains ALL technical items from:
+          - skills[]
+          - languages[]
+          - experience[].skills_used
+          - projects[].technologies
+        """
+        aggregated: List[Dict[str, Any]] = []
+
+        # Existing skills from LLM
+        for s in data.get("skills", []) or []:
+            if not s:
+                continue
+            name = s.get("name")
+            if not name:
+                continue
+            aggregated.append({
+                "name": name,
+                "category": s.get("category", "Technical"),
+                "proficiency": s.get("proficiency"),
+            })
+
+        # Languages[]
+        for lang in data.get("languages", []) or []:
+            if not lang:
+                continue
+            aggregated.append({
+                "name": str(lang),
+                "category": "Language",
+                "proficiency": None,
+            })
+
+        #  experience[].skills_used
+        for exp in data.get("experience", []) or []:
+            for sk in exp.get("skills_used", []) or []:
+                if not sk:
+                    continue
+                aggregated.append({
+                    "name": str(sk),
+                    "category": "Technical",
+                    "proficiency": None,
+                })
+
+        # projects[].technologies
+        for proj in data.get("projects", []) or []:
+            techs = proj.get("technologies", []) or []
+            for t in techs:
+                if not t:
+                    continue
+                aggregated.append({
+                    "name": str(t),
+                    "category": "Technical",
+                    "proficiency": None,
+                })
+
+        # ---- de-duplicate by lowercase name ----
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for s in aggregated:
+            name = s.get("name")
+            if not name:
+                continue
+            key = str(name).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(s)
+
+        data["skills"] = deduped
+        return data
+
+
     def _parse_llm_response(self, response: str) -> ResumeData:
         """Parse LLM response and create ResumeData object"""
         try:
@@ -539,13 +619,16 @@ Important instructions:
             # Try to parse as-is first
             try:
                 data = json.loads(json_str)
+                data = self._augment_skills_from_other_fields(data)
                 return ResumeData(**data)
             except json.JSONDecodeError:
                 # Try fixing common issues
                 fixed_json = self._fix_json_string(json_str)
                 try:
                     data = json.loads(fixed_json)
+                    data = self._augment_skills_from_other_fields(data)
                     return ResumeData(**data)
+
                 except json.JSONDecodeError as e:
                     # If still failing, try to fix delimiter errors at specific position
                     error_msg = str(e)
