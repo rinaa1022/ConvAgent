@@ -91,16 +91,74 @@ class UnifiedNeo4jManager:
             github=person_data.get('personal_info', {}).get('github'),
             summary=person_data.get('summary')
             )
-            
-            # Create skills
-            if person_data.get('skills'):
-                self._create_person_skills(session, person_id, person_data['skills'])
-            
-            # Create experiences
+
+            # -------- NEW: aggregate ALL skills into one list --------
+            aggregated_skills: list[dict] = []
+
+            # top-level skills from the LLM
+            for s in person_data.get("skills", []) or []:
+                if not s:
+                    continue
+                # already in {name, category, proficiency} form
+                if s.get("name"):
+                    aggregated_skills.append(s)
+
+            # languages[]
+            for lang in person_data.get("languages", []) or []:
+                if not lang:
+                    continue
+                aggregated_skills.append({
+                    "name": lang,
+                    "category": "Language",
+                    "proficiency": None,
+                })
+
+            # experience[].skills_used
+            for exp in person_data.get("experience", []) or []:
+                for sk in exp.get("skills_used", []) or []:
+                    if not sk:
+                        continue
+                    aggregated_skills.append({
+                        "name": sk,
+                        "category": "Technical",
+                        "proficiency": None,
+                    })
+
+            # projects[].technologies
+            for proj in person_data.get("projects", []) or []:
+                techs = proj.get("technologies", []) or []
+                for t in techs:
+                    if not t:
+                        continue
+                    aggregated_skills.append({
+                        "name": t,
+                        "category": "Technical",
+                        "proficiency": None,
+                    })
+
+            # de-duplicate by normalized name
+            seen = set()
+            deduped_skills = []
+            for s in aggregated_skills:
+                name = s.get("name")
+                if not name:
+                    continue
+                key = normalize_skill_name(str(name))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_skills.append({
+                    "name": name,
+                    "category": s.get("category", "Technical"),
+                    "proficiency": s.get("proficiency"),
+                })
+
+            if deduped_skills:
+                self._create_person_skills(session, person_id, deduped_skills)
+
             if person_data.get('experience'):
                 self._create_person_experiences(session, person_id, person_data['experience'])
             
-            # Create education
             if person_data.get('education'):
                 self._create_person_education(session, person_id, person_data['education'])
 
@@ -108,6 +166,7 @@ class UnifiedNeo4jManager:
                 self._create_person_projects(session, person_id, person_data['projects'])
 
         return person_id
+
     
     def _create_person_skills(self, session, person_id: str, skills: List[Dict[str, Any]]):
         """Create skill nodes and relationships for a person"""
