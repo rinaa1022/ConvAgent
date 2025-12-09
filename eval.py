@@ -1,7 +1,7 @@
 import pandas as pd
 from unified_neo4j_manager import UnifiedNeo4jManager
 import os
-
+from dotenv import load_dotenv
 
 NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USER = "neo4j"
@@ -126,14 +126,16 @@ def evaluate_at_k(manager: UnifiedNeo4jManager,
 
 
 if __name__ == "__main__":
+    load_dotenv()
+
     # Load annotation file
     df = pd.read_csv(ANNOTATION_CSV)
 
-    # Connect to Neo4j
+    # Connect to Neo4j – use env vars if set, otherwise fall back to constants
     manager = UnifiedNeo4jManager(
-        uri=os.getenv("NEO4J_URI"),
-        user=os.getenv("NEO4J_USER"),
-        password=os.getenv("NEO4J_PASSWORD"),
+        uri=os.getenv("NEO4J_URI", NEO4J_URI),
+        user=os.getenv("NEO4J_USER", NEO4J_USER),
+        password=os.getenv("NEO4J_PASSWORD", NEO4J_PASSWORD),
     )
 
     try:
